@@ -545,6 +545,7 @@ function editFields(d, p) {
       <label class="f">Extras<input type="number" inputmode="numeric" min="0" id="${p}Extras" value="${d.extras ?? ""}"></label>
       <label class="f">Novel status<input id="${p}NStat" value="${esc(d.novelStatus || "")}" placeholder="Completed, Ongoing…"></label>
     </div></div>
+    <label class="f full">Cover image<input id="${p}CoverIn" placeholder="Paste a copied cover, or its link" autocomplete="off" inputmode="url"></label>
     <label class="f full">Source link<input type="url" id="${p}Url" value="${esc(d.sourceUrl || "")}" placeholder="https://…" autocomplete="off"></label>
     <label class="f full">Tags (comma separated)<input id="${p}Tags" value="${esc((d.tags || []).join(", "))}" autocomplete="off"></label>
     <label class="f full">Synopsis<textarea id="${p}Desc">${esc(d.description || "")}</textarea></label>
@@ -854,6 +855,8 @@ async function runExtract(prompt, opts, url, note) {
     if (!j || typeof j !== "object" || !(j.title || j.originalTitle)) throw { code: "invalid_json" };
     if (S.sheet !== a) return;
     Object.assign(a, { draft: toDraft(j, url), note, busy: false, status: "", shelf: "want" });
+    withPastedCover(a);
+    if (a.draft.cover || a.draft.coverUrl) a.note = (a.note || "") + " The cover came from the page too.";
   } catch (e) { if (S.sheet !== a) return; a.busy = false; a.status = sampleErr(e); }
   renderSheet();
 }
@@ -941,6 +944,8 @@ function extractText(text, url) {
   if (!j.title && !j.originalTitle) return setStatus("Couldn't find a title in that text. Try Type it in.");
   const a = S.sheet;
   Object.assign(a, { draft: toDraft(j, url), note: j.isWebNovel ? "Picked out from the NovelUpdates page. Check the details, then pick a shelf." : "Best guess from the pasted text. Check the title, author and length.", status: "", shelf: "want" });
+  withPastedCover(a);
+  if (a.draft.cover || a.draft.coverUrl) a.note += " The cover came from the page too.";
   renderSheet(true);
 }
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -1097,6 +1102,63 @@ document.addEventListener("change", async ev => {
   if (t.id === "pUnit") { const tot = $("#pTot"); if (tot) tot.disabled = t.value === "pct"; }
   if (/^[ae]Web$/.test(t.id)) { const w = $("#" + t.id[0] + "WebFields"); if (w) w.hidden = !t.checked; }
 });
+// ---------- covers from pasted pages and images ----------
+function coverFromHTML(html) {
+  if (!html || !/<img/i.test(html)) return "";
+  let doc; try { doc = new DOMParser().parseFromString(html, "text/html"); } catch { return ""; }
+  const imgs = [...doc.querySelectorAll("img")].map(i => ({ src: i.getAttribute("src") || i.getAttribute("data-src") || "", el: i })).filter(x => /^https?:\/\//i.test(x.src));
+  const abs = u => u.replace(/^http:/i, "https:");
+  const nu = imgs.find(x => /novelupdates\.com\/(images|img)\//i.test(x.src) && !/noimg|nocover|avatar|icon|logo|flag/i.test(x.src));
+  if (nu) return abs(nu.src);
+  const series = imgs.find(x => x.el.closest(".seriesimg, .serieseditimg, .book-cover, .cover, [class*=cover]"));
+  if (series) return abs(series.src);
+  const generic = imgs.find(x => /\.(jpe?g|png|webp)(\?|$)/i.test(x.src) && !/icon|logo|avatar|flag|star|sprite|emoji|badge|banner|ads?\//i.test(x.src));
+  return generic ? abs(generic.src) : "";
+}
+function withPastedCover(a) {
+  if (!a || !a.draft) return;
+  if (a.pasteCoverData && !a.draft.cover) a.draft.cover = a.pasteCoverData;
+  else if (a.pasteCover && !a.draft.cover && !a.draft.coverUrl) a.draft.coverUrl = a.pasteCover;
+}
+function refreshCoverPreview(b) {
+  document.querySelectorAll(".sheet .hero .jacket").forEach(j => { j.outerHTML = jacket(b); });
+}
+function setCoverOn(prefix, patch) {
+  if (prefix === "a" && S.sheet?.draft) {
+    S.sheet.draft = { ...S.sheet.draft, ...readFields("a"), cover: undefined, coverUrl: undefined, ...patch };
+    refreshCoverPreview({ ...S.sheet.draft, title: S.sheet.draft.title || "Untitled" });
+  } else if (prefix === "e") {
+    const b = S.books.get(S.sheet?.id); if (!b) return;
+    delete b.cover; delete b.coverUrl; delete b.noCover; Object.assign(b, patch);
+    b.updatedAt = Date.now(); S.books.set(b.id, b);
+    if (S.mode === "cloud") queue(b.id, () => S.coll.doc(b.id).set(clean(b))); else saveLocal();
+    render(); refreshCoverPreview(b);
+  }
+  toast("Cover updated");
+}
+document.addEventListener("paste", async ev => {
+  const t = ev.target, cd = ev.clipboardData; if (!cd || !t || !t.id) return;
+  const file = [...(cd.files || [])].find(f => /^image\//.test(f.type));
+  if (t.id === "pasteText" && S.sheet?.type === "add") {
+    const u = coverFromHTML(cd.getData("text/html"));
+    if (u) { S.sheet.pasteCover = u; S.sheet.pasteCoverData = null; setStatus("Found the cover image too."); }
+    else if (file && !cd.getData("text/plain")) { ev.preventDefault(); try { S.sheet.pasteCoverData = await readCover(file); setStatus("Cover image added. Now paste the page text too."); } catch {} }
+    return;
+  }
+  const m = t.id.match(/^([ae])CoverIn$/); if (!m) return;
+  ev.preventDefault();
+  if (file) { try { setCoverOn(m[1], { cover: await readCover(file) }); t.value = ""; } catch { toast("That image couldn't be read."); } return; }
+  const fromHtml = coverFromHTML(cd.getData("text/html"));
+  const txt = (cd.getData("text/plain") || "").trim();
+  const u = fromHtml || (/^https?:\/\/\S+$/i.test(txt) ? txt.replace(/^http:/i, "https:") : "");
+  if (u) { setCoverOn(m[1], { coverUrl: u }); t.value = ""; } else toast("Paste a copied image, or a link to one.");
+});
+document.addEventListener("change", ev => {
+  const m = ev.target.id && ev.target.id.match(/^([ae])CoverIn$/); if (!m) return;
+  const v = ev.target.value.trim();
+  if (/^https?:\/\/\S+$/i.test(v)) { setCoverOn(m[1], { coverUrl: v.replace(/^http:/i, "https:") }); ev.target.value = ""; }
+});
+
 document.addEventListener("keydown", ev => {
   if (ev.key === "Escape" && S.sheet) closeSheet();
   if (ev.key === "Enter" && ev.target.id === "searchQ") { ev.preventDefault(); ev.target.blur(); searchTitle(); }

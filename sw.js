@@ -1,5 +1,5 @@
 // Lily Shelf service worker: keeps the app working offline.
-const CACHE = "lily-shelf-v2";
+const CACHE = "lily-shelf-v3";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => {
@@ -14,7 +14,7 @@ self.addEventListener("fetch", e => {
     return;
   }
   // Fonts and book covers: use the saved copy, refresh it in the background.
-  if (/fonts\.(googleapis|gstatic)\.com|covers\.openlibrary\.org|books\.google\.com|googleusercontent\.com/.test(url.hostname)) {
+  if (/fonts\.(googleapis|gstatic)\.com|covers\.openlibrary\.org|books\.google\.com|googleusercontent\.com|novelupdates\.com/.test(url.hostname)) {
     e.respondWith(caches.open(CACHE + "-media").then(async c => {
       const hit = await c.match(req);
       const net = fetch(req).then(r => { if (r.ok || r.type === "opaque") c.put(req, r.clone()); return r; }).catch(() => hit);
