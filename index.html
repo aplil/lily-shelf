@@ -708,6 +708,7 @@ function mapImport(rows) {
       if (b.status === "dnf") b.dnfAt = csvDate(g("Date Read")) || csvDate(g("Date Added"));
       b.year = g("Original Publication Year") || g("Year Published");
       b.importKey = "gr:" + g("Book Id");
+      { const d = (g("ISBN13") || g("ISBN")).replace(/[^0-9Xx]/g, ""); if (d.length === 13 || d.length === 10) b.isbn = d; }
       const added = parseD(csvDate(g("Date Added"))); b.addedAt = added ? added.getTime() : now - i;
     } else {
       b.author = g("Authors");
@@ -725,6 +726,7 @@ function mapImport(rows) {
       if (b.status === "finished" && !b.finishedAt) b.finishedAt = lastRead;
       if (b.status === "dnf" && !b.dnfAt) b.dnfAt = lastRead || csvDate(g("Date Added"));
       b.importKey = "sg:" + (g("ISBN/UID") || bookKey(title, b.author));
+      { const raw = g("ISBN/UID").trim(); if (/^\d{9}[\dXx]$|^\d{13}$/.test(raw)) b.isbn = raw; }
       const added = parseD(csvDate(g("Date Added"))); b.addedAt = added ? added.getTime() : now - i;
     }
     if (hasHan(b.title)) b.originalTitle = b.title;
@@ -771,6 +773,7 @@ async function runImport() {
   if (top && !counts[S.tab]) { S.tab = top[0]; try { localStorage.setItem("lilyshelf.tab", S.tab); } catch {} }
   render();
   if (S.sheet === a) renderSheet(); else toast(`Imported ${r.total - r.failed} books`);
+  if (typeof afterImport === "function") afterImport();
 }
 
 function backupPayload() {
@@ -782,6 +785,10 @@ function backupHTML() {
       <p style="margin:0">${n} book${n === 1 ? "" : "s"} · ${S.mode === "cloud" ? "saved to your Claude account" : "saved on this iPhone, inside the Lily Shelf app"}</p>
       <button class="btn primary block" data-act="export" ${n ? "" : "disabled"}>Export my shelf</button>
       <p class="hint">Saves a .json backup with every book, date, rating and progress entry. Export one every so often and keep it in Files or iCloud Drive, so your books are safe if you delete the app or change phones.</p></div>
+    <div class="group"><h4>Book covers</h4>
+      <p class="hint" style="margin:0">${(() => { const n = [...S.books.values()].filter(needsCover).length; return n ? `${n} book${n === 1 ? " has" : "s have"} no cover yet. Lily Shelf can look them up on Google Books and Open Library.` : "Every book has a cover, or none could be found."; })()}</p>
+      <button class="btn block" data-act="find-covers" ${coverRun.on ? "disabled" : ""}>Find missing covers</button>
+      <p class="status-line" id="coverStatus">${coverRun.on ? `Finding covers… ${coverRun.done} of ${coverRun.total}` : ""}</p></div>
     <div class="group"><h4>Restore or import</h4>
       <p class="hint" style="margin:0">Bring in a Lily Shelf backup, or a Goodreads or StoryGraph export. Books already on your shelf are skipped.</p>
       <button class="btn block" data-act="import">Choose a file</button></div>`;
@@ -1030,7 +1037,7 @@ document.addEventListener("click", ev => {
       const f = readFields("e"); if (!f.title && !f.originalTitle) { toast("Give it a title first"); break; }
       if (!f.title) f.title = f.originalTitle; Object.assign(b, f); S.sheet.editing = false; saveBook(b); toast("Details saved");
     } break;
-    case "rm-cover": if (b) { delete b.cover; delete b.coverUrl; saveBook(b); } break;
+    case "rm-cover": if (b) { delete b.cover; delete b.coverUrl; b.noCover = true; saveBook(b); } break;
     case "method": S.sheet.ctl?.abort?.(); S.sheet = { type: "add", method: el.dataset.m }; renderSheet(); break;
     case "stop": S.sheet.ctl?.abort?.(); break;
     case "import": openSheet({ type: "add", method: "import" }); break;
@@ -1095,6 +1102,61 @@ document.addEventListener("keydown", ev => {
   if (ev.key === "Enter" && ev.target.id === "searchQ") { ev.preventDefault(); ev.target.blur(); searchTitle(); }
   if (ev.key === "Enter" && ev.target.id === "linkUrl") { ev.preventDefault(); fetchLink(); }
 });
+
+// ---------- cover finder ----------
+const coverRun = { on: false, done: 0, total: 0, found: 0 };
+const needsCover = b => !b.cover && !b.coverUrl && !b.noCover;
+async function lookupCover(b) {
+  const tryGoogle = async q => {
+    const r = await fetch("https://www.googleapis.com/books/v1/volumes?maxResults=3&printType=books&q=" + encodeURIComponent(q));
+    if (!r.ok) throw new Error("google");
+    const j = await r.json();
+    for (const it of j.items || []) { const l = (it.volumeInfo || {}).imageLinks; const u = l && (l.thumbnail || l.smallThumbnail); if (u) return u.replace(/^http:/, "https:").replace("&edge=curl", ""); }
+    return "";
+  };
+  const title = String(b.title || "").replace(/\s*\([^)]*#\s*[\d.]+\)\s*$/, "").replace(/"/g, "");
+  const author = String(b.author || "").split(",")[0].replace(/"/g, "");
+  let u = "";
+  try {
+    if (b.isbn) u = await tryGoogle("isbn:" + b.isbn);
+    if (!u) u = await tryGoogle(`intitle:"${title}"` + (author ? ` inauthor:"${author}"` : ""));
+  } catch {}
+  if (!u) {
+    try {
+      const r = await fetch("https://openlibrary.org/search.json?limit=1&fields=cover_i&title=" + encodeURIComponent(title) + (author ? "&author=" + encodeURIComponent(author) : ""));
+      const j = r.ok ? await r.json() : {}; const c = (j.docs || [])[0]; if (c && c.cover_i) u = "https://covers.openlibrary.org/b/id/" + c.cover_i + "-M.jpg";
+    } catch {}
+  }
+  if (!u && b.isbn) u = "https://covers.openlibrary.org/b/isbn/" + b.isbn + "-M.jpg?default=false";
+  return u;
+}
+async function findCovers(quiet) {
+  if (coverRun.on) return;
+  if (!navigator.onLine) { if (!quiet) toast("You're offline. Connect to the internet to find covers."); return; }
+  const list = [...S.books.values()].filter(needsCover);
+  if (!list.length) { if (!quiet) toast("Every book already has a cover"); return; }
+  Object.assign(coverRun, { on: true, done: 0, total: list.length, found: 0 });
+  updateCoverUI();
+  if (quiet) toast(`Finding covers for ${list.length} books…`);
+  for (const b of list) {
+    const u = await lookupCover(b);
+    const cur = S.books.get(b.id);
+    if (cur && needsCover(cur)) { if (u) { cur.coverUrl = u; coverRun.found++; } else cur.noCover = true; }
+    coverRun.done++;
+    if (coverRun.done % 5 === 0 || coverRun.done === coverRun.total) { saveLocal(); render(); }
+    updateCoverUI();
+    await wait(250);
+  }
+  coverRun.on = false; saveLocal(); render(); updateCoverUI();
+  toast(`Found covers for ${coverRun.found} of ${coverRun.total} books`);
+}
+function updateCoverUI() {
+  const el = $("#coverStatus"); if (!el) return;
+  el.textContent = coverRun.on ? `Finding covers… ${coverRun.done} of ${coverRun.total}` : coverRun.total ? `Found ${coverRun.found} of ${coverRun.total} covers.` : "";
+  const btn = $("[data-act=find-covers]"); if (btn) btn.disabled = coverRun.on;
+}
+function afterImport() { setTimeout(() => findCovers(true), 600); }
+document.addEventListener("click", ev => { if (ev.target.closest("[data-act=find-covers]")) findCovers(false); });
 
 // ---------- boot ----------
 async function boot() {
