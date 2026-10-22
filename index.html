@@ -344,7 +344,7 @@ function jacket(b) {
   const key = b.title || b.originalTitle || "";
   const h = hash(key), hue = h % 360, pat = (h >> 9) % 4;
   const src = b.cover || b.coverUrl;
-  const img = src ? `<img src="${esc(src)}" alt="" loading="lazy" onerror="this.remove()">` : "";
+  const img = src ? `<img src="${esc(src)}" alt="" loading="lazy" onerror="${b.id && !b.cover ? `window.lsCoverFail&&lsCoverFail('${esc(b.id)}',this.getAttribute('src'));` : ""}this.remove()">` : "";
   const vert = hasHan(b.originalTitle) ? b.originalTitle : hasHan(b.title) ? b.title : "";
   const latin = hasHan(b.title) ? "" : String(b.title || "").replace(/\s*\([^)]*#\s*[\d.]+\)\s*$/, "");
   const inner = vert && !latin
@@ -356,7 +356,7 @@ function jacket(b) {
 const stars = n => { n = Math.round(n || 0); return n ? `<span class="stars" aria-label="${n} of 5 stars">${"★".repeat(n)}<span style="opacity:.3">${"★".repeat(5 - n)}</span></span>` : ""; };
 function progLabel(b) {
   const u = unitOf(b), c = b.current || 0;
-  if (u === "pct") return `${c}%`;
+  if (u === "pct") return "Read so far";
   return b.total ? `${UNIT_WORD[u][0] === "page" ? "Page" : "Ch"} ${c} of ${b.total}` : `${UNIT_WORD[u][0] === "page" ? "Page" : "Ch"} ${c}`;
 }
 function progressHTML(b) {
@@ -423,7 +423,7 @@ function render() {
         ${b.author ? `<p class="sub">${esc(b.author)}</p>` : ""}
         ${progressHTML(b)}
         <div class="card-actions">
-          <button class="btn small primary" data-act="inc" data-id="${b.id}">+1 ${unitOf(b) === "pct" ? "%" : unitOf(b) === "ch" ? "chapter" : "page"}</button>
+          <button class="btn small primary" data-act="inc" data-id="${b.id}">${unitOf(b) === "pct" ? "+5%" : unitOf(b) === "ch" ? "+1 chapter" : "+1 page"}</button>
           <button class="btn small" data-act="open" data-id="${b.id}" data-focus="1">Update</button>
         </div>
       </div></article>`).join("")}</div>`;
@@ -498,6 +498,8 @@ function detailHTML() {
 
   ${b.status !== "want" ? `<div class="group" id="progressGroup"><h4>Progress</h4>
     ${progressHTML(b)}
+    <div class="seg" role="group" aria-label="Track progress by">${[["page", "Pages"], ["ch", "Chapters"], ["pct", "Percent"]].map(([k, l]) => `<button data-act="set-unit" data-u="${k}" aria-pressed="${u === k}">${l}</button>`).join("")}</div>
+    ${u === "pct" ? `<p class="hint" style="margin:0">For e-readers: enter the % your Kindle, Kobo or reading app shows.</p>` : ""}
     <div class="stepper">
       <button data-act="step" data-n="-1" aria-label="Back one">−</button>
       <div class="val"><input type="number" inputmode="numeric" min="0" id="pCur" value="${b.current || 0}" aria-label="Current ${word[0]}"><small>${u === "pct" ? "percent" : b.total ? `${word[0]} of ${b.total}` : word[0]}</small></div>
@@ -1004,7 +1006,15 @@ document.addEventListener("click", ev => {
     case "close": closeSheet(); break;
     case "open": openSheet({ type: "detail", id: el.dataset.id });
       if (el.dataset.focus) setTimeout(() => $("#progressGroup")?.scrollIntoView({ block: "start" }), 50); break;
-    case "inc": if (b) { const v = clampVal(b, (b.current || 0) + 1); if (v === b.current) { toast("Already at the end. Open it to log it as finished."); break; } logProgress(b, v); haptic(); saveBook(b); if (pct(b) === 100) toast("Last one! Open the book to log it as finished."); } break;
+    case "inc": if (b) { const v = clampVal(b, (b.current || 0) + (unitOf(b) === "pct" ? 5 : 1)); if (v === b.current) { toast("Already at the end. Open it to log it as finished."); break; } logProgress(b, v); haptic(); saveBook(b); if (pct(b) === 100) toast("Last one! Open the book to log it as finished."); } break;
+    case "set-unit": if (b) {
+      const from = unitOf(b), to = el.dataset.u; if (from === to) break;
+      const cur = b.current || 0; let v = cur;
+      if (to === "pct") v = b.total ? Math.round((cur / b.total) * 100) : Math.min(cur, 100);
+      else if (from === "pct") v = b.total ? Math.round((cur / 100) * b.total) : 0;
+      b.unit = to; b.current = clampVal(b, v);
+      saveBook(b); toast(to === "pct" ? "Now tracking by percent" : to === "ch" ? "Now tracking by chapter" : "Now tracking by page");
+    } break;
     case "step": { const i = $("#pCur"); if (b && i) { i.value = clampVal(b, (num(i.value) || 0) + +el.dataset.n); syncRange(); haptic(); } } break;
     case "start": if (b) { b.status = "reading"; b.startedAt = b.startedAt || today(); saveBook(b); toast("Started today. Happy reading"); } break;
     case "more": S.sheet.more = true; renderSheet(); break;
@@ -1178,18 +1188,20 @@ async function lookupCover(b) {
   };
   const title = String(b.title || "").replace(/\s*\([^)]*#\s*[\d.]+\)\s*$/, "").replace(/"/g, "");
   const author = String(b.author || "").split(",")[0].replace(/"/g, "");
+  const bad = new Set(b.badCovers || []);
+  const ok = x => (x && !bad.has(x) ? x : "");
   let u = "";
   try {
-    if (b.isbn) u = await tryGoogle("isbn:" + b.isbn);
-    if (!u) u = await tryGoogle(`intitle:"${title}"` + (author ? ` inauthor:"${author}"` : ""));
+    if (b.isbn) u = ok(await tryGoogle("isbn:" + b.isbn));
+    if (!u) u = ok(await tryGoogle(`intitle:"${title}"` + (author ? ` inauthor:"${author}"` : "")));
   } catch {}
   if (!u) {
     try {
       const r = await fetch("https://openlibrary.org/search.json?limit=1&fields=cover_i&title=" + encodeURIComponent(title) + (author ? "&author=" + encodeURIComponent(author) : ""));
-      const j = r.ok ? await r.json() : {}; const c = (j.docs || [])[0]; if (c && c.cover_i) u = "https://covers.openlibrary.org/b/id/" + c.cover_i + "-M.jpg";
+      const j = r.ok ? await r.json() : {}; const c = (j.docs || [])[0]; if (c && c.cover_i) u = ok("https://covers.openlibrary.org/b/id/" + c.cover_i + "-M.jpg");
     } catch {}
   }
-  if (!u && b.isbn) u = "https://covers.openlibrary.org/b/isbn/" + b.isbn + "-M.jpg?default=false";
+  if (!u && b.isbn) u = ok("https://covers.openlibrary.org/b/isbn/" + b.isbn + "-M.jpg?default=false");
   return u;
 }
 async function findCovers(quiet) {
@@ -1199,7 +1211,6 @@ async function findCovers(quiet) {
   if (!list.length) { if (!quiet) toast("Every book already has a cover"); return; }
   Object.assign(coverRun, { on: true, done: 0, total: list.length, found: 0 });
   updateCoverUI();
-  if (quiet) toast(`Finding covers for ${list.length} books…`);
   for (const b of list) {
     const u = await lookupCover(b);
     const cur = S.books.get(b.id);
@@ -1210,13 +1221,22 @@ async function findCovers(quiet) {
     await wait(250);
   }
   coverRun.on = false; saveLocal(); render(); updateCoverUI();
-  toast(`Found covers for ${coverRun.found} of ${coverRun.total} books`);
+  if (!quiet || coverRun.found) toast(`Found covers for ${coverRun.found} of ${coverRun.total} books`);
 }
 function updateCoverUI() {
   const el = $("#coverStatus"); if (!el) return;
   el.textContent = coverRun.on ? `Finding covers… ${coverRun.done} of ${coverRun.total}` : coverRun.total ? `Found ${coverRun.found} of ${coverRun.total} covers.` : "";
   const btn = $("[data-act=find-covers]"); if (btn) btn.disabled = coverRun.on;
 }
+let failSave = null;
+window.lsCoverFail = (id, src) => {
+  if (!navigator.onLine) return;
+  const b = S.books.get(id); if (!b || b.cover || !b.coverUrl || b.coverUrl !== src) return;
+  b.badCovers = [...new Set([...(b.badCovers || []), src])].slice(-5); delete b.coverUrl;
+  clearTimeout(failSave); failSave = setTimeout(() => { saveLocal(); setTimeout(() => findCovers(true), 1500); }, 800);
+};
+function autoCovers() { if (navigator.onLine && [...S.books.values()].some(needsCover)) setTimeout(() => findCovers(true), 2500); }
+window.addEventListener("online", autoCovers);
 function afterImport() { setTimeout(() => findCovers(true), 600); }
 document.addEventListener("click", ev => { if (ev.target.closest("[data-act=find-covers]")) findCovers(false); });
 
@@ -1225,6 +1245,7 @@ async function boot() {
   S.mode = "local"; loadLocal(); render();
   try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch {}
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+  autoCovers();
   window.addEventListener("storage", e => { if (e.key === "lilyshelf.books") { S.books = new Map(); loadLocal(); render(); } });
 }
 boot();
